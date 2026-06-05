@@ -1,0 +1,227 @@
+name: Mini Data Platform CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  AIRFLOW_UID: "50000"
+  AIRFLOW_FERNET_KEY: "81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs="
+  AIRFLOW_ADMIN_PASSWORD: "admin"
+  POSTGRES_PASSWORD: "postgres"
+  MINIO_ROOT_USER: "minioadmin"
+  MINIO_ROOT_PASSWORD: "minioadmin"
+
+jobs:
+  # ── 1. Lint ──────────────────────────────────────────────────────────────── #
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linting tools
+        run: pip install flake8
+
+      - name: Lint DAGs
+        run: flake8 dags/ --max-line-length=100 --extend-ignore=E402
+
+      - name: Lint data generator
+        run: flake8 data_generator/ --max-line-length=100
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile.airflow
+          ignore: DL3008
+
+      - name: Validate docker-compose syntax
+        run: docker compose config --quiet
+
+  # ── 2. Build ─────────────────────────────────────────────────────────────── #
+  build:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Airflow image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.airflow
+          push: false
+          tags: mini-data-platform/airflow:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pull remaining service images
+        run: |
+          docker pull postgres:15-alpine
+          docker pull minio/minio:RELEASE.2024-06-13T22-53-53Z
+          docker pull metabase/metabase:v0.49.13
+
+  # ── 3. Integration test (main branch only) ───────────────────────────────── #
+  integration-test:
+    name: Integration test
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create .env file
+        run: |
+          cat > .env <<EOF
+          AIRFLOW_UID=${AIRFLOW_UID}
+          AIRFLOW_FERNET_KEY=${AIRFLOW_FERNET_KEY}
+          AIRFLOW_ADMIN_PASSWORD=${AIRFLOW_ADMIN_PASSWORD}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          MINIO_ROOT_USER=${MINIO_ROOT_USER}
+          MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+          EOF
+
+      - name: Start platform
+        run: docker compose up -d
+
+      - name: Wait – PostgreSQL healthy
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U postgres && break
+            sleep 5
+          done
+
+      - name: Wait – MinIO healthy
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 5
+          done
+
+      - name: Wait – airflow-init completed
+        run: docker compose wait airflow-init
+
+      - name: Wait – Airflow webserver healthy
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && echo "" && break
+            echo "Attempt $i: Airflow not ready yet..."
+            sleep 10
+          done
+
+      - name: Install data generator deps
+        run: pip install -r data_generator/requirements.txt
+
+      - name: Generate and upload test data
+        env:
+          MINIO_ENDPOINT: "http://localhost:9000"
+          MINIO_BUCKET: "sales-data"
+        run: python data_generator/generate_sales_data.py --rows 100
+
+      # ── MinIO → Airflow → PostgreSQL validation ── #
+      - name: Trigger DAG run
+        id: trigger
+        run: |
+          RUN_ID="ci_$(date +%Y%m%dT%H%M%S)"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          curl -sf -X POST "http://localhost:8080/api/v1/dags/sales_pipeline/dagRuns" \
+            -H "Content-Type: application/json" \
+            -u "admin:admin" \
+            -d "{\"dag_run_id\": \"${RUN_ID}\", \"conf\": {}}"
+
+      - name: Wait for DAG success
+        run: |
+          RUN_ID="${{ steps.trigger.outputs.run_id }}"
+          for i in $(seq 1 36); do
+            STATE=$(curl -sf -u admin:admin \
+              "http://localhost:8080/api/v1/dags/sales_pipeline/dagRuns/${RUN_ID}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
+            echo "DAG state: $STATE (attempt $i)"
+            [ "$STATE" = "success" ] && exit 0
+            [ "$STATE" = "failed"  ] && echo "DAG failed!" && exit 1
+            sleep 10
+          done
+          echo "Timeout waiting for DAG completion"
+          exit 1
+
+      - name: Verify rows in PostgreSQL
+        run: |
+          COUNT=$(docker compose exec -T postgres \
+            psql -U postgres -d platform -tAc "SELECT COUNT(*) FROM public.sales;")
+          echo "Row count: $COUNT"
+          [ "$COUNT" -gt 0 ] || (echo "No rows loaded into PostgreSQL!" && exit 1)
+
+      # ── Metabase API check ── #
+      - name: Wait – Metabase healthy
+        run: |
+          for i in $(seq 1 40); do
+            STATUS=$(curl -sf http://localhost:3000/api/health \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" \
+              2>/dev/null || true)
+            echo "Metabase status: $STATUS (attempt $i)"
+            [ "$STATUS" = "ok" ] && exit 0
+            sleep 15
+          done
+          echo "Metabase did not become healthy in time"
+          exit 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose logs --tail=200 > /tmp/compose-logs.txt
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: compose-logs
+          path: /tmp/compose-logs.txt
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v
+
+  # ── 4. Deploy (main branch, after integration test) ──────────────────────── #
+  deploy:
+    name: Deploy to test environment
+    runs-on: ubuntu-latest
+    needs: integration-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        # Set DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY in GitHub Secrets.
+        # If secrets are not configured, this step is skipped gracefully.
+        if: ${{ secrets.DEPLOY_HOST != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/mini-data-platform
+            git pull origin main
+            docker compose build airflow-webserver airflow-scheduler
+            docker compose pull postgres minio metabase
+            docker compose up -d
+            docker compose ps
+
+      - name: Deployment summary
+        if: ${{ secrets.DEPLOY_HOST == '' }}
+        run: |
+          echo "Deploy secrets not configured — skipping remote deploy."
+          echo "Set DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY in repository secrets to enable."
