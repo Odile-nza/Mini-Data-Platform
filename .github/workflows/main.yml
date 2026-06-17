@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main'
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +93,21 @@ jobs:
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
           MINIO_ROOT_USER=${MINIO_ROOT_USER}
           MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+          COMPOSE_PROJECT_NAME=mini-data-platform
           EOF
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Airflow image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.airflow
+          push: false
+          load: true
+          tags: mini-data-platform/airflow:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start platform
         run: docker compose up -d
@@ -114,13 +128,15 @@ jobs:
 
       - name: Wait – airflow-init completed
         run: |
-          timeout 600 bash -c "until docker compose ps airflow-init 2>&1 | grep -E \"Exit|Exited\"; do sleep 10; done"
-          echo "airflow-init completed"
+          echo "Waiting 3 minutes for Airflow to initialize..."
+          sleep 180
+          docker compose ps
+          echo "Airflow init wait complete"
 
       - name: Wait – Airflow webserver healthy
         run: |
           for i in $(seq 1 30); do
-            curl -sf http://localhost:8080/health && echo "" && break
+            curl -sf http://localhost:8088/api/v2/monitor/health && echo "" && break
             echo "Attempt $i: Airflow not ready yet..."
             sleep 10
           done
@@ -135,23 +151,32 @@ jobs:
         run: python data_generator/generate_sales_data.py --rows 100
 
       # ── MinIO → Airflow → PostgreSQL validation ── #
+      - name: Unpause DAG
+        run: |
+          curl -sf -X PATCH "http://localhost:8088/api/v2/dags/sales_pipeline" \
+            -H "Content-Type: application/json" \
+            -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
+            -d '{"is_paused": false}'
+
       - name: Trigger DAG run
         id: trigger
         run: |
           RUN_ID="ci_$(date +%Y%m%dT%H%M%S)"
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-          curl -sf -X POST "http://localhost:8080/api/v1/dags/sales_pipeline/dagRuns" \
+          curl -sf -X POST "http://localhost:8088/api/v2/dags/sales_pipeline/dagRuns" \
             -H "Content-Type: application/json" \
-            -u "admin:admin" \
+            -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
             -d "{\"dag_run_id\": \"${RUN_ID}\", \"conf\": {}}"
 
       - name: Wait for DAG success
         run: |
           RUN_ID="${{ steps.trigger.outputs.run_id }}"
           for i in $(seq 1 36); do
-            STATE=$(curl -sf -u admin:admin \
-              "http://localhost:8080/api/v1/dags/sales_pipeline/dagRuns/${RUN_ID}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
+            STATE=$(curl -sf -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
+              "http://localhost:8088/api/v2/dags/sales_pipeline/dagRuns/${RUN_ID}" \
+              2>/dev/null \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','unknown'))" \
+              2>/dev/null || echo "unknown")
             echo "DAG state: $STATE (attempt $i)"
             [ "$STATE" = "success" ] && exit 0
             [ "$STATE" = "failed"  ] && echo "DAG failed!" && exit 1

@@ -16,6 +16,7 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_FERNET_KEY:-supersecretkey}"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
     MINIO_ENDPOINT: "http://minio:9000"
     MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
     MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
