@@ -7,7 +7,7 @@ Usage:
     python generate_sales_data.py --rows 500
 """
 import argparse
-import io
+from typing import List, Dict
 import os
 import random
 import uuid
@@ -112,11 +112,10 @@ def generate_row(faker: Faker, dirty: bool = False) -> dict:
     return row
 
 
-#def rows_to_csv(rows: list[dict]) -> str:
+# rows_to_csv: converts list of row dicts to CSV string
 
-from typing import List, Dict
 
-def rows_to_csv(rows: List[Dict]) -> str:    
+def rows_to_csv(rows: List[Dict]) -> str:
     lines = [CSV_HEADER]
     for r in rows:
         lines.append(
