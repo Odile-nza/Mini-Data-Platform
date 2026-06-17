@@ -114,7 +114,7 @@ jobs:
 
       - name: Wait – airflow-init completed
         run: |
-          timeout 300 bash -c "until docker compose ps airflow-init | grep -q Exit; do sleep 5; done"
+          timeout 600 bash -c "until docker compose ps airflow-init 2>&1 | grep -E \"Exit|Exited\"; do sleep 10; done"
           echo "airflow-init completed"
 
       - name: Wait – Airflow webserver healthy
