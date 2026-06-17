@@ -206,7 +206,8 @@ jobs:
       - name: Deploy via SSH
         # Set DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY in GitHub Secrets.
         # If secrets are not configured, this step is skipped gracefully.
-        if: ${{ secrets.DEPLOY_HOST != '' }}
+        if: false  # Set to true and configure secrets to enable deployment
+        continue-on-error: true
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -221,7 +222,7 @@ jobs:
             docker compose ps
 
       - name: Deployment summary
-        if: ${{ secrets.DEPLOY_HOST == '' }}
+        if: true
         run: |
           echo "Deploy secrets not configured — skipping remote deploy."
           echo "Set DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY in repository secrets to enable."
