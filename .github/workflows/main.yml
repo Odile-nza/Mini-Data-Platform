@@ -153,30 +153,24 @@ jobs:
       # ── MinIO → Airflow → PostgreSQL validation ── #
       - name: Unpause DAG
         run: |
-          curl -sf -X PATCH "http://localhost:8088/api/v2/dags/sales_pipeline" \
-            -H "Content-Type: application/json" \
-            -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
-            -d '{"is_paused": false}'
+          docker compose exec -T airflow-webserver airflow dags unpause sales_pipeline
 
       - name: Trigger DAG run
         id: trigger
         run: |
           RUN_ID="ci_$(date +%Y%m%dT%H%M%S)"
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-          curl -sf -X POST "http://localhost:8088/api/v2/dags/sales_pipeline/dagRuns" \
-            -H "Content-Type: application/json" \
-            -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
-            -d "{\"dag_run_id\": \"${RUN_ID}\", \"conf\": {}}"
+          docker compose exec -T airflow-webserver \
+            airflow dags trigger sales_pipeline --run-id "$RUN_ID"
 
       - name: Wait for DAG success
         run: |
           RUN_ID="${{ steps.trigger.outputs.run_id }}"
           for i in $(seq 1 36); do
-            STATE=$(curl -sf -u "admin:${AIRFLOW_ADMIN_PASSWORD}" \
-              "http://localhost:8088/api/v2/dags/sales_pipeline/dagRuns/${RUN_ID}" \
-              2>/dev/null \
-              | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','unknown'))" \
-              2>/dev/null || echo "unknown")
+            STATE=$(docker compose exec -T postgres \
+              psql -U postgres -d airflow -tAc \
+              "SELECT state FROM dag_run WHERE dag_id='sales_pipeline' AND run_id='${RUN_ID}';" \
+              2>/dev/null | tr -d '[:space:]')
             echo "DAG state: $STATE (attempt $i)"
             [ "$STATE" = "success" ] && exit 0
             [ "$STATE" = "failed"  ] && echo "DAG failed!" && exit 1
