@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 # ----- connection helpers -------------------------------------------------- #
 
+
 def _s3():
     return boto3.client(
         "s3",
@@ -105,7 +106,7 @@ UPSERT_SQL = """
 
 def process_and_load(**context) -> None:
     files: List[str] = context["ti"].xcom_pull(key="file_list",
-                                                task_ids="list_new_files")
+                                               task_ids="list_new_files")
     s3 = _s3()
     bucket = os.environ["MINIO_BUCKET"]
     total_loaded, total_dropped, processed = 0, 0, []
