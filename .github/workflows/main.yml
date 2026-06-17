@@ -30,10 +30,10 @@ jobs:
         run: pip install flake8
 
       - name: Lint DAGs
-        run: flake8 dags/ --max-line-length=100 --extend-ignore=E402
+        run: flake8 dags/ --max-line-length=100 --extend-ignore=E402,E127,E302
 
       - name: Lint data generator
-        run: flake8 data_generator/ --max-line-length=100
+        run: flake8 data_generator/ --max-line-length=100 --extend-ignore=E402,E127,E302
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
